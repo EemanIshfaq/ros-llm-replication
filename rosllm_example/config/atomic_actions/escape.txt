@@ -1,0 +1,3 @@
+Escapes from a wall collision. Use this when observation warns about wall contact.
+No input required.
+{"input": ""}

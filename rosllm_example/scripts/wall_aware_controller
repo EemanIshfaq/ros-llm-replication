@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import rospy
+from turtlesim.msg import Pose
+from turtlesim.srv import TeleportAbsolute
+
+class WallAwareController:
+    def __init__(self):
+        rospy.init_node('wall_aware_controller', anonymous=False)
+        rospy.loginfo("[WallAware] NOVELTY: Wall-Aware Controller Started")
+        rospy.Subscriber('/turtle1/pose', Pose, self.pose_callback)
+        self.x = 5.5
+        self.y = 5.5
+        self.theta = 0.0
+        self.danger_dist = 1.2
+        self.last_escape = 0.0
+        self.escape_cooldown = 3.0
+        rospy.loginfo("[WallAware] Ready. Danger threshold=1.2 units")
+
+    def pose_callback(self, msg):
+        self.x = msg.x
+        self.y = msg.y
+        self.theta = msg.theta
+
+    def get_nearest_wall(self):
+        distances = {
+            'north': 11.089 - self.y,
+            'south': self.y,
+            'east': 11.089 - self.x,
+            'west': self.x
+        }
+        nearest = min(distances, key=distances.get)
+        return nearest, distances[nearest]
+
+    def escape_wall(self, wall):
+        now = rospy.get_time()
+        if now - self.last_escape < self.escape_cooldown:
+            return
+        self.last_escape = now
+        rospy.logwarn("[WallAware] WALL HIT: %s — Teleporting to safety", wall)
+        try:
+            rospy.wait_for_service('/turtle1/teleport_absolute', timeout=2.0)
+            teleport = rospy.ServiceProxy('/turtle1/teleport_absolute', TeleportAbsolute)
+            safe_x = max(2.5, min(8.5, self.x))
+            safe_y = max(2.5, min(8.5, self.y))
+            teleport(safe_x, safe_y, self.theta)
+            rospy.logwarn("[WallAware] RESCUED: moved from (%.1f,%.1f) to (%.1f,%.1f)", 
+                         self.x, self.y, safe_x, safe_y)
+        except Exception as e:
+            rospy.logerr("[WallAware] Teleport failed: %s", e)
+
+    def run(self):
+        rate = rospy.Rate(10)
+        rospy.loginfo("[WallAware] Monitoring loop active")
+        while not rospy.is_shutdown():
+            wall, dist = self.get_nearest_wall()
+            if dist < self.danger_dist:
+                rospy.logwarn("[WallAware] DANGER: %.2f from %s wall", dist, wall)
+                self.escape_wall(wall)
+            rate.sleep()
+
+if __name__ == "__main__":
+    try:
+        WallAwareController().run()
+    except rospy.ROSInterruptException:
+        pass

@@ -1,0 +1,391 @@
+import rospy
+import time
+import json
+import math
+from geometry_msgs.msg import Twist
+from turtlesim.msg import Pose
+from std_msgs.msg import String 
+# ── Turtlesim world bounds (default 11.09 x 11.09) ──────────────────────────
+WALL_MIN = 0.5          # turtlesim clamps at ~0.0, we warn at 0.5
+WALL_MAX = 10.5         # turtlesim clamps at ~11.09, we warn at 10.5
+WALL_CRITICAL = 0.3     # distance to wall at which we STOP and escape
+ 
+# ── Escape manoeuvre parameters ──────────────────────────────────────────────
+ESCAPE_BACK_VEL   = -1.0   # reverse velocity (m/s)
+ESCAPE_BACK_TIME  = 1.0    # seconds to reverse
+ESCAPE_TURN_VEL   = 1.5708 # 90-degree turn velocity (rad/s)
+ESCAPE_TURN_TIME  = 1.0    # seconds to turn (approx 90 deg)
+ 
+# ── Stuck detection ──────────────────────────────────────────────────────────
+STUCK_DIST_THRESHOLD = 0.05  # if robot moved less than this it is stuck
+ 
+ 
+class WallAwareController:
+    """
+    Wraps the turtlesim action execution with boundary awareness.
+ 
+    Subscribes to /turtle1/pose and:
+      - Publishes enriched observation strings to /wall_aware/observation
+      - Publishes wall status to /wall_aware/status  
+      - Provides /wall_aware/escape service to trigger escape manoeuvre
+      - Overrides /turtle1/cmd_vel when wall contact is imminent
+    """
+ 
+    def __init__(self):
+        rospy.init_node('wall_aware_controller', anonymous=False)
+        rospy.loginfo("[WallAware] Starting Wall-Aware Closed-Loop Controller")
+        rospy.loginfo("[WallAware] NOVELTY: Adds boundary detection missing from paper")
+ 
+        # Current pose
+        self.pose = Pose()
+        self.pose_received = False
+ 
+        # Track previous pose for stuck detection
+        self.prev_pose = Pose()
+        self.consecutive_stuck_count = 0
+        STUCK_COUNT_LIMIT = 3
+        self.last_escape_time = 0
+        self.escape_cooldown = 2.0 
+        # Publishers
+        self.cmd_pub = rospy.Publisher(
+            '/turtle1/cmd_vel', Twist, queue_size=10)
+ 
+        self.obs_pub = rospy.Publisher(
+             '/wall_aware/observation', String, queue_size=1) 
+        # Subscriber
+        rospy.Subscriber('/turtle1/pose', Pose, self._pose_callback)
+ 
+        # Wait for first pose
+        rospy.loginfo("[WallAware] Waiting for turtle pose...")
+        while not self.pose_received and not rospy.is_shutdown():
+            rospy.sleep(0.1)
+        rospy.loginfo("[WallAware] Pose received. Controller active.")
+ 
+        # Register ROS service so ros_agent_srv can call it
+        from rosllm_srvs.srv import AtomicAction, AtomicActionResponse
+        rospy.Service(
+            '/wall_aware/escape',
+            AtomicAction,
+            self._handle_escape_service
+        )
+ 
+        rospy.loginfo("[WallAware] Ready. Monitoring boundaries.")
+ 
+    # ── Pose callback ────────────────────────────────────────────────────────
+ 
+    def _pose_callback(self, msg):
+        self.prev_pose = self.pose
+        self.pose = msg
+        self.pose_received = True
+ 
+        # Check for wall contact and log it clearly for viva demo
+        status = self.get_wall_status()
+        if status['touching_wall']:
+            rospy.logwarn(
+                "[WallAware] WALL CONTACT DETECTED at x=%.3f y=%.3f | "
+                "Wall: %s | Triggering escape manoeuvre",
+                self.pose.x, self.pose.y, status['wall_side']
+            )
+ 
+    # ── Wall status ──────────────────────────────────────────────────────────
+ 
+    def get_wall_status(self):
+        """
+        Returns a dict describing proximity to all four walls.
+ 
+        Returns
+        -------
+        dict with keys:
+            touching_wall  : bool  — True if within WALL_CRITICAL distance
+            near_wall      : bool  — True if within (WALL_MAX - WALL_MIN) / 2
+            wall_side      : str   — 'north','south','east','west' or 'none'
+            distances      : dict  — distance to each wall
+            safe_to_forward: bool  — True if heading away from nearest wall
+        """
+        x, y, theta = self.pose.x, self.pose.y, self.pose.theta
+ 
+        dist_south = y - WALL_MIN          # distance to bottom wall
+        dist_north = WALL_MAX - y + (10.5 - WALL_MAX)  # ~= 11.09 - y
+        dist_west  = x - WALL_MIN
+        dist_east  = WALL_MAX - x + (10.5 - WALL_MAX)
+ 
+        # Use raw turtlesim boundary (11.09)
+        dist_north = 11.089 - y
+        dist_east  = 11.089 - x
+        dist_south = y
+        dist_west  = x
+ 
+        min_dist = min(dist_north, dist_south, dist_east, dist_west)
+ 
+        
+        touching = min_dist < WALL_CRITICAL
+ 
+        # Is the robot heading toward the nearest wall?
+        # theta=0 → east, pi/2 → north, pi → west, -pi/2 → south
+        heading_toward_wall = False
+        if nearest == 'north' and math.sin(theta) > 0.5:
+            heading_toward_wall = True
+        elif nearest == 'south' and math.sin(theta) < -0.5:
+            heading_toward_wall = True
+        elif nearest == 'east' and math.cos(theta) > 0.5:
+            heading_toward_wall = True
+        elif nearest == 'west' and math.cos(theta) < -0.5:
+            heading_toward_wall = True
+ 
+        return {
+            'touching_wall':   touching,
+            'near_wall':       near,
+            'wall_side':       nearest if (touching or near) else 'none',
+            'min_dist':        min_dist,
+            'distances': {
+                'north': dist_north,
+                'south': dist_south,
+                'east':  dist_east,
+                'west':  dist_west,
+            },
+            'safe_to_forward': not (near and heading_toward_wall),
+            'heading_toward_wall': heading_toward_wall,
+        }
+ 
+    # ── Enriched observation string ──────────────────────────────────────────
+ 
+    def get_observation_with_wall_info(self):
+        """
+        Returns the standard pose observation PLUS wall proximity info.
+ 
+        This is the KEY NOVELTY — the LLM prompt now contains boundary
+        awareness that the original paper never included. Without this,
+        the LLM has no way to know the robot is stuck against a wall.
+ 
+        Returns
+        -------
+        str : enriched observation string for injection into LLM prompt
+        """
+        status = self.get_wall_status()
+        x, y, theta = self.pose.x, self.pose.y, self.pose.theta
+        theta_deg = math.degrees(theta)
+ 
+        # Base observation (matches paper's sensor_description template)
+        base_obs = (
+            f"The turtle is at x={x:.3f}, y={y:.3f}, theta={theta:.3f} "
+            f"({theta_deg:.1f} degrees), "
+            f"linear_velocity={self.pose.linear_velocity:.3f}, "
+            f"angular_velocity={self.pose.angular_velocity:.3f}."
+        )
+ 
+        # Wall proximity addition — THIS IS THE NOVELTY
+        if status['touching_wall']:
+            wall_obs = (
+                f" WARNING: Robot is IN CONTACT with the {status['wall_side']} wall "
+                f"(distance={status['min_dist']:.3f}). "
+                f"DO NOT move forward. You must first turn away from the wall "
+                f"or call the escape action before proceeding."
+            )
+        elif status['near_wall'] and status['heading_toward_wall']:
+            wall_obs = (
+                f" CAUTION: Robot is {status['min_dist']:.2f} units from the "
+                f"{status['wall_side']} wall and heading toward it. "
+                f"Consider turning before moving forward."
+            )
+        elif status['near_wall']:
+            wall_obs = (
+                f" NOTE: Robot is {status['min_dist']:.2f} units from the "
+                f"{status['wall_side']} wall."
+            )
+        else:
+            wall_obs = (
+                f" Nearest wall: {status['wall_side']} at "
+                f"{status['min_dist']:.2f} units. Safe to move."
+            )
+ 
+        return base_obs + wall_obs
+ 
+    # ── Escape manoeuvre ─────────────────────────────────────────────────────
+ 
+    def execute_escape(self):
+        """
+        Automatic escape manoeuvre when wall contact is detected.
+ 
+        Sequence:
+          1. Stop
+          2. Reverse away from wall for ESCAPE_BACK_TIME seconds
+          3. Turn 90 degrees away from wall
+          4. Log the escape for reward tracking
+ 
+        This is triggered either:
+          - Automatically when wall contact is detected (closed-loop)
+          - Via the /wall_aware/escape ROS service (called by LLM agent)
+ 
+        Returns
+        -------
+        bool : True if escape succeeded (robot moved away from wall)
+        """
+        rospy.loginfo("[WallAware] ── ESCAPE MANOEUVRE STARTING ──")
+        status = self.get_wall_status()
+        rate = rospy.Rate(10)
+ 
+        # Step 1: Stop
+        self._publish_twist(0.0, 0.0, 0.0)
+        rospy.sleep(0.2)
+ 
+        # Step 2: Reverse
+        rospy.loginfo("[WallAware] Step 1/3: Reversing away from %s wall",
+                      status['wall_side'])
+        t_start = rospy.Time.now()
+        while (rospy.Time.now() - t_start).to_sec() < ESCAPE_BACK_TIME:
+            self._publish_twist(ESCAPE_BACK_VEL, 0.0, 0.0)
+            rate.sleep()
+ 
+        self._publish_twist(0.0, 0.0, 0.0)
+        rospy.sleep(0.2)
+ 
+        # Step 3: Turn 90 degrees away from wall
+        # Determine turn direction based on which wall we hit
+        wall = status['wall_side']
+        if wall in ('north', 'east'):
+            turn_vel = ESCAPE_TURN_VEL    # turn left (counter-clockwise)
+        else:
+            turn_vel = -ESCAPE_TURN_VEL   # turn right (clockwise)
+ 
+        rospy.loginfo("[WallAware] Step 2/3: Turning away from wall")
+        t_start = rospy.Time.now()
+        while (rospy.Time.now() - t_start).to_sec() < ESCAPE_TURN_TIME:
+            self._publish_twist(0.0, 0.0, turn_vel)
+            rate.sleep()
+ 
+        self._publish_twist(0.0, 0.0, 0.0)
+        rospy.sleep(0.2)
+ 
+        # Step 4: Verify escape succeeded
+        new_status = self.get_wall_status()
+        success = not new_status['touching_wall']
+        rospy.loginfo("[WallAware] Step 3/3: Escape %s (min_dist=%.3f)",
+                      "SUCCEEDED" if success else "FAILED",
+                      new_status['min_dist'])
+        return success
+ 
+    def _handle_escape_service(self, req):
+        """ROS service handler — lets ros_agent_srv call escape via LLM."""
+        from rosllm_srvs.srv import AtomicActionResponse
+        success = self.execute_escape()
+        return AtomicActionResponse(
+            success=success,
+            output=json.dumps({
+                'escaped': success,
+                'new_observation': self.get_observation_with_wall_info()
+            })
+        )
+ 
+    # ── Stuck detection ──────────────────────────────────────────────────────
+ 
+    def is_stuck(self):
+        """
+        Detects if the robot has not moved since the last check.
+        Used for closed-loop replanning.
+ 
+        Returns
+        -------
+        bool : True if robot position has not changed significantly
+        """
+        dx = self.pose.x - self.prev_pose.x
+        dy = self.pose.y - self.prev_pose.y
+        dist = math.sqrt(dx*dx + dy*dy)
+        return dist < STUCK_DIST_THRESHOLD
+ 
+    # ── Helpers ──────────────────────────────────────────────────────────────
+ 
+    def _publish_twist(self, linear_x, linear_y, angular_z):
+        twist = Twist()
+        twist.linear.x  = linear_x
+        twist.linear.y  = linear_y
+        twist.angular.z = angular_z
+        self.cmd_pub.publish(twist)
+ 
+    # ── Main monitoring loop ─────────────────────────────────────────────────
+ 
+    def run(self):
+        """
+        Main loop — monitors pose and triggers escape if wall contact detected.
+        Runs at 10 Hz so it can react faster than the LLM action loop.
+        """
+        rate = rospy.Rate(10)
+        rospy.loginfo("[WallAware] Monitoring loop active at 10 Hz")
+ 
+        while not rospy.is_shutdown():
+            if self.pose_received:
+                status = self.get_wall_status()
+ 
+                # Auto-escape on wall contact
+                if status['touching_wall']:
+                    self.execute_escape()
+ 
+                # Publish enriched observation for ros_agent_srv to use
+                obs_str = self.get_observation_with_wall_info()
+                # (logged at DEBUG level to avoid log spam)
+                rospy.logdebug("[WallAware] obs: %s", obs_str)
+                self.obs_pub.publish(String(data=obs_str))
+            rate.sleep()
+ 
+ 
+# ════════════════════════════════════════════════════════════════════════════
+# Standalone test — run without full ROS-LLM stack to verify wall detection
+# ════════════════════════════════════════════════════════════════════════════
+ 
+def test_wall_detection_only():
+    """
+    Lightweight test: just checks boundary detection logic.
+    Run with: python3 wall_aware_controller.py (no ROS needed for this part)
+    """
+    print("\n=== Wall Detection Logic Test (no ROS required) ===\n")
+ 
+    # Simulate poses at different positions
+    test_cases = [
+        (5.5,  5.5,  0.0,   "centre of arena"),
+        (10.8, 5.5,  0.0,   "near east wall, heading east"),
+        (5.5,  10.8, 1.571, "near north wall, heading north"),
+        (0.2,  5.5,  3.14,  "near west wall, heading west"),
+        (5.5,  0.2, -1.571, "near south wall, heading south"),
+        (11.1, 5.5,  0.0,   "AT east wall (clamped position)"),
+    ]
+ 
+    for x, y, theta, desc in test_cases:
+        # Simulate the status calculation inline
+        dist_north = 11.089 - y
+        dist_east  = 11.089 - x
+        dist_south = y
+        dist_west  = x
+        min_dist = min(dist_north, dist_south, dist_east, dist_west)
+ 
+        touching = min_dist < WALL_CRITICAL
+        near     = min_dist < 1.0
+ 
+        theta_deg = math.degrees(theta)
+        print(f"Position: ({x:.1f}, {y:.1f}, {theta_deg:.0f}°) — {desc}")
+        print(f"  Nearest wall dist: {min_dist:.3f}")
+        print(f"  Touching: {touching} | Near: {near}")
+ 
+        if touching:
+            print(f"  → ESCAPE MANOEUVRE NEEDED")
+        elif near:
+            print(f"  → CAUTION: approaching wall")
+        else:
+            print(f"  → SAFE")
+        print()
+ 
+ 
+# ════════════════════════════════════════════════════════════════════════════
+ 
+if __name__ == '__main__':
+    import sys
+ 
+    # If called with --test flag, run logic test only (no ROS)
+    if '--test' in sys.argv:
+        test_wall_detection_only()
+        sys.exit(0)
+ 
+    try:
+        controller = WallAwareController()
+        controller.run()
+    except rospy.ROSInterruptException:
+        rospy.loginfo("[WallAware] Controller shut down cleanly.")
+ 

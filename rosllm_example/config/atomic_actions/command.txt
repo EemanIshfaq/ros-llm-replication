@@ -1,0 +1,6 @@
+Commands the turtle.
+
+The input you must provide is as follows:
+{"fwd_vel": ..., "strafe_vel": ..., "ang_vel": ...}
+
+where fwd_vel is the forward velocity, strafe_vel is the strafe velocity, and ang_vel is the angular velocity.

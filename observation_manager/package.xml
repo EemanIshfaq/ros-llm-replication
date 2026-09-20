@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>observation_manager</name>
+  <version>1.0.0</version>
+  <description>The observation_manager package</description>
+  <maintainer email="christopher.mower@huawei.com">cmower</maintainer>
+  <author email="christopher.mower@huawei.com">cmower</author>
+  <license>MIT</license>
+  <url type="website">https://github.com/huawei-noah/HEBO/tree/rosllm/ROSLLM</url>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>rosllm_srvs</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_export_depend>rosllm_srvs</build_export_depend>
+  <build_export_depend>rospy</build_export_depend>
+  <exec_depend>rosllm_srvs</exec_depend>
+  <exec_depend>rospy</exec_depend>
+</package>

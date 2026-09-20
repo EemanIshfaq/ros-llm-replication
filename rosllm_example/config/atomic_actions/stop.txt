@@ -1,0 +1,2 @@
+Stops all turtle motion immediately.
+No input required. Input: ""

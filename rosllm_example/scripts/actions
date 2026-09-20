@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import json, time
+import rospy
+from geometry_msgs.msg import Twist
+from rosllm_srvs.srv import AtomicAction, AtomicActionResponse
+class Actions:
+    def __init__(self):
+        rospy.init_node("actions_node")
+        self.pub = rospy.Publisher("turtle1/cmd_vel", Twist, queue_size=10)
+        rospy.Service("command", AtomicAction, self.command_handler)
+        rospy.Service("forward", AtomicAction, self.forward)
+        rospy.Service("strafe", AtomicAction, self.strafe)
+        rospy.Service("turn", AtomicAction, self.turn)
+        rospy.Service("wait", AtomicAction, self.wait)
+        rospy.Service("spin_action", AtomicAction, self.spin_action)
+        rospy.Service("circle", AtomicAction, self.circle)
+        rospy.Service("spiral", AtomicAction, self.spiral)
+        rospy.loginfo("Actions ready!")
+    def pub_vel(self,f,s,a,d):
+        m=Twist();m.linear.x=float(f);m.linear.y=float(s);m.angular.z=float(a)
+        r=rospy.Rate(10);t=time.time()
+        while time.time()-t<d:self.pub.publish(m);r.sleep()
+        self.pub.publish(Twist())
+    def move(self,fwd_vel,strafe_vel,ang_vel):self.pub_vel(fwd_vel,strafe_vel,ang_vel,1.0)
+    def command_handler(self,req):self.move(**json.loads(req.input));return AtomicActionResponse(success=True)
+    def forward(self,req):self.pub_vel(json.loads(req.input)["vel"],0,0,1.0);return AtomicActionResponse(success=True)
+    def strafe(self,req):self.pub_vel(0,json.loads(req.input)["vel"],0,1.0);return AtomicActionResponse(success=True)
+    def turn(self,req):self.pub_vel(0,0,json.loads(req.input)["vel"],1.0);return AtomicActionResponse(success=True)
+    def spin_action(self,req):
+        inp=json.loads(req.input) if req.input.strip() else {}
+        speed=float(inp.get("speed",6.28));turns=float(inp.get("turns",1.0))
+        dur=turns*(6.28318/abs(speed))
+        rospy.loginfo("SPINNING speed=%s turns=%s",speed,turns)
+        self.pub_vel(0,0,speed,dur);return AtomicActionResponse(success=True)
+    def circle(self,req):
+        inp=json.loads(req.input) if req.input.strip() else {}
+        fwd=float(inp.get("fwd_vel",1.5));ang=float(inp.get("ang_vel",1.0));dur=float(inp.get("duration",6.28))
+        rospy.loginfo("CIRCLE fwd=%s ang=%s dur=%s",fwd,ang,dur)
+        self.pub_vel(fwd,0,ang,dur);return AtomicActionResponse(success=True)
+    def spiral(self,req):
+        inp=json.loads(req.input) if req.input.strip() else {}
+        ang=float(inp.get("ang_vel",1.0));steps=int(inp.get("steps",5))
+        [self.pub_vel(0.3*i,0,ang,1.0) for i in range(1,steps+1)]
+        return AtomicActionResponse(success=True)
+    def wait(self,req):rospy.sleep(1.0);return AtomicActionResponse(success=True)
+    def spin(self):rospy.spin()
+def main():Actions().spin()
+if __name__=="__main__":main()

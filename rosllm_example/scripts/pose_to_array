@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+import rospy
+from std_msgs.msg import Float64MultiArray
+from turtlesim.msg import Pose
+
+class PoseToArrayNode:
+    def __init__(self):
+        rospy.init_node("pose_to_array_node")
+        self.pub = rospy.Publisher("sensor_data", Float64MultiArray, queue_size=10)
+        rospy.Subscriber("pose", Pose, self.cb, queue_size=10)
+
+    def cb(self, msg: Pose):
+        out = Float64MultiArray()
+        out.data = [msg.x, msg.y, msg.theta, msg.linear_velocity, msg.angular_velocity]
+        self.pub.publish(out)
+
+    def spin(self):
+        rospy.spin()
+
+if __name__ == "__main__":
+    PoseToArrayNode().spin()

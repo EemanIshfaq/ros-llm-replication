@@ -1,0 +1,5 @@
+Spins the turtle in a full 360 degree rotation. Visually impressive spinning motion.
+Optional input: {"speed": 6.28, "turns": 1.0}
+speed = angular velocity (default 6.28 = one full rotation per second)
+turns = number of full rotations (default 1.0)
+For fast spin use: {"speed": 9.0, "turns": 2.0}

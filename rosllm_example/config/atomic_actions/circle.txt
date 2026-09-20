@@ -1,0 +1,5 @@
+Moves the turtle in a circle by combining forward and angular velocity simultaneously.
+Input: {"fwd_vel": 1.5, "ang_vel": 1.0, "duration": 6.28}
+fwd_vel = forward speed (default 1.5)
+ang_vel = turning speed (default 1.0)
+duration = seconds to run (default 6.28 = full circle)

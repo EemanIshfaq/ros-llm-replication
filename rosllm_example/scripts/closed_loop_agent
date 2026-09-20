@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+
+import rospy
+import json
+import math
+from rosllm_srvs.srv import LLM, LLMRequest
+from rosllm_srvs.srv import AtomicAction, AtomicActionRequest
+from turtlesim.msg import Pose
+
+
+class ClosedLoopAgent:
+
+    def __init__(self):
+        rospy.init_node('closed_loop_agent')
+
+        rospy.loginfo("Closed-loop agent started (FIXED VERSION)")
+
+        # pose
+        self.pose = None
+        rospy.Subscriber('/turtle1/pose', Pose, self.pose_callback)
+
+        # services
+        rospy.wait_for_service('/call_llm')
+        rospy.wait_for_service('/forward')
+        rospy.wait_for_service('/turn')
+
+        self.llm_srv = rospy.ServiceProxy('/call_llm', LLM)
+        self.fwd_srv = rospy.ServiceProxy('/forward', AtomicAction)
+        self.turn_srv = rospy.ServiceProxy('/turn', AtomicAction)
+
+    def pose_callback(self, msg):
+        self.pose = msg
+
+    def distance(self, gx, gy):
+        if not self.pose:
+            return 999
+        return math.sqrt((self.pose.x - gx)**2 + (self.pose.y - gy)**2)
+
+    def run(self, gx, gy):
+
+        prev_output = ""
+
+        for step in range(10):
+
+            dist = self.distance(gx, gy)
+            rospy.loginfo(f"Step {step} | Distance: {dist:.2f}")
+
+            if dist < 0.5:
+                rospy.loginfo("GOAL REACHED")
+                return
+
+            prompt = f"""
+You control a turtle robot.
+Current goal: ({gx}, {gy})
+Distance: {dist:.2f}
+
+Use ONLY these actions:
+- forward(2.0)
+- turn(1.57 or -1.57)
+
+Return NDJSON ONLY:
+{{"name":"turn","input":{{"vel":"1.57"}}}}
+{{"name":"forward","input":{{"vel":"2.0"}}}}
+"""
+
+            resp = self.llm_srv(LLMRequest(prompt=prompt))
+            plan = resp.response.response
+
+            for line in plan.splitlines():
+                if not line.strip().startswith("{"):
+                    continue
+
+                try:
+                    action = json.loads(line)
+                    name = action["name"]
+                    inp = json.dumps(action["input"])
+
+                    if name == "forward":
+                        self.fwd_srv(AtomicActionRequest(input=inp, prev_output=prev_output))
+                    elif name == "turn":
+                        self.turn_srv(AtomicActionRequest(input=inp, prev_output=prev_output))
+
+                except Exception as e:
+                    rospy.logwarn(str(e))
+
+
+if __name__ == "__main__":
+    agent = ClosedLoopAgent()
+    rospy.sleep(1)
+    agent.run(8.0, 8.0)

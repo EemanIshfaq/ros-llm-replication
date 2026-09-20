@@ -1,0 +1,47 @@
+
+<launch>
+
+  <node pkg="turtlesim" name="turtle" type="turtlesim_node"/>
+
+  <node pkg="agent_comm" type="llm_node" name="llm">
+
+    <param name="model" type="string" value="llama-3.3-70b-versatile"/>
+
+    <param name="base_url" type="string" value="https://api.groq.com/openai/v1"/>
+
+    <param name="temperature" type="double" value="0.8"/>
+
+    <param name="api_key" type="string" value="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"/>
+
+  </node>
+
+  <node pkg="rosllm_example" name="posetoarray" type="pose_to_array" ns="turtle1"/>
+
+  <node pkg="observation_manager" name="pose_summarizer" type="template_summarizer" ns="turtle1">
+
+    <param name="sensor_description_path" value="$(find rosllm_example)/config/sensor_description.txt"/>
+
+  </node>
+
+  <node pkg="observation_manager" name="obs_manager" type="observation_manager_node">
+
+    <param name="config_filename" value="$(find rosllm_example)/config/obs_config.yaml"/>
+
+  </node>
+
+  <node pkg="rosllm_example" name="actions" type="actions"/>
+
+  <node pkg="behavior_executor" name="behavior" type="sequence_executor"/>
+
+  <node pkg="agent_comm" type="ros_agent_srv" name="agent" output="screen">
+
+    <param name="atomic_action_library_path" value="$(find rosllm_example)/config/atomic_actions/lib.yaml"/>
+
+    <param name="expert_advice_path" value="$(find rosllm_example)/config/expert_advice.txt"/>
+
+  </node>
+
+  <node pkg="rosllm_example" name="wall_aware_controller" type="wall_aware_controller" output="screen"/>
+
+</launch>
+

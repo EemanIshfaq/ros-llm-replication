@@ -1,0 +1,10 @@
+atomic_actions:
+  command: command.txt
+  forward: forward.txt
+  strafe: strafe.txt
+  turn: turn.txt
+  spin_action: spin_action.txt
+  circle: circle.txt
+  spiral: spiral.txt
+  stop: stop.txt
+  escape: escape.txt

@@ -1,0 +1,10 @@
+This sensor provides the current simulated pose of a turtle in the turtlesim environment.
+It outputs five floating-point values:
+
+(1) x – the turtle’s horizontal position in the simulator’s world coordinates.
+(2) y – the turtle’s vertical position in the simulator’s world coordinates.
+(3) theta – the turtle’s orientation in radians, measured counterclockwise from the positive x-axis.
+(4) linear_velocity – the turtle’s forward speed in units per second.
+(5) angular_velocity – the turtle’s rotational speed in radians per second.
+
+The values are continuously updated to reflect the turtle’s movement and heading in the simulation.

@@ -1,0 +1,4 @@
+Moves the turtle in an outward spiral pattern.
+Input: {"ang_vel": 1.0, "steps": 5}
+ang_vel = turning speed (default 1.0)
+steps = number of spiral steps, each faster than last (default 5)

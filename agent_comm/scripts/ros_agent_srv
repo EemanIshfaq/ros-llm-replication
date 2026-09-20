@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+import re
+import sys
+import os
+import rospy
+import yaml
+from copy import deepcopy
+from pathlib import Path
+from rosllm_srvs.srv import Observation, ObservationRequest, ObservationResponse
+from rosllm_srvs.srv import (
+    ExecuteBehavior,
+    ExecuteBehaviorResponse,
+    ExecuteBehaviorRequest,
+)
+from rosllm_srvs.srv import LLM as LLMSrv
+from rosllm_srvs.srv import LLMRequest as LLMSrvRequest
+from rosllm_srvs.srv import LLMResponse as LLMSrvResponse
+
+sys.path.insert(0, os.path.dirname(__file__))
+from action_memory import ActionMemory, is_repeat_intent
+
+prompt_template = """You are an agent that selects appropriate actions based on human input and observations from the environment.
+
+# Atomic actions
+You have several atomic actions available to you, which are defined in the atomic action library (these are split into name and description).
+{atomic_action_library}
+
+{expert_advice}
+
+# Observations
+This is a list of observations from the environment, you should use this to select an appropriate action.
+{observations}
+
+# Human inputs
+This is a list of human inputs, you should use this to select an appropriate action.
+{human_inputs}
+
+{response_format}
+"""
+
+response_format = """# Response format
+Your response should be formatted as follows (ie json lines):
+```json
+{"name": "...", "input": "..."}
+{"name": "...", "input": "..."}
+```
+where "name" is the name of the atomic action you want to execute (from the list above), and "input" is the input to that action as provided in the description.
+If no input is required, you can simply provide an empty string "".
+Notice, you can select a sequence of actions to execute or just a single action - you should choose this based on the environment state and human input."""
+
+expert_advice_template = """# Expert advice
+{expert_advice}"""
+
+
+class RosAgent:
+
+    def __init__(self, atomic_action_library):
+        self.atomic_action_library = atomic_action_library
+        self.human = []
+        self.memory = ActionMemory(maxlen=10)
+
+        expert_advice_path = rospy.get_param("~expert_advice_path", "")
+        if expert_advice_path:
+            self.expert_advice = expert_advice_template.format(expert_advice=Path(expert_advice_path).read_text())
+        else:
+            self.expert_advice = ""
+
+    def get_action(self, human, obs):
+        self.human.append(human)
+        prompt = prompt_template.format(
+            observations=str(obs),
+            human_inputs=human,
+            expert_advice=self.expert_advice,
+            atomic_action_library=self.atomic_action_library,
+            response_format=response_format,
+        )
+        req = LLMSrvRequest(prompt=prompt)
+        try:
+            rospy.wait_for_service("call_llm", timeout=10.0)
+            handler = rospy.ServiceProxy("call_llm", LLMSrv)
+            resp = handler(req).response
+        except rospy.ServiceException as e:
+            rospy.logerr(f"Service call failed: {e}")
+            return ""
+
+        match = re.search(r"```json\s*(\{.*?\})\s*```", resp.response, re.DOTALL)
+        if match:
+            action = match.group(1)
+        else:
+            action = ""
+
+        return action
+
+
+class RosEnv:
+
+    def __init__(self):
+        rospy.init_node('ros_agent', anonymous=True)
+        self.beta = rospy.get_param("~beta", 0.5)
+        self.obs = []
+
+    def get_atomic_action_library(self):
+        path = Path(rospy.get_param("~atomic_action_library_path"))
+        config = yaml.load(path.read_text(), Loader=yaml.SafeLoader)
+        atomic_actions = ""
+        for index, (name, descr_file) in enumerate(config['atomic_actions'].items(), start=1):
+            descr = (path.parent / descr_file).read_text()
+            atomic_actions += f"# Atomic action {index}:\nName: '{name}'\nDescription:\n{descr}\n\n"
+        return atomic_actions
+
+    def handle_action(self, action):
+        rospy.wait_for_service("execute_behavior", timeout=10.0)
+        req = ExecuteBehaviorRequest(behavior=action)
+        try:
+            handler = rospy.ServiceProxy("execute_behavior", ExecuteBehavior)
+            response = handler(req)
+            success = response.success
+            if not success:
+                rospy.logerr(f"Failed to execute action: {response.message}")
+        except rospy.ServiceException as e:
+            rospy.logerr(f"Service call failed: {e}")
+            success = False
+        return not success
+
+    def get_obs(self):
+        rospy.wait_for_service("get_observation", timeout=10.0)
+        try:
+            handler = rospy.ServiceProxy("get_observation", Observation)
+            response = handler(ObservationRequest())
+            curr_obs = response.observation
+        except rospy.ServiceException as e:
+            rospy.logerr(f"Service call failed: {e}")
+            curr_obs = []
+
+        self.obs.append(curr_obs)
+        return deepcopy(self.obs)
+
+    def get_done(self):
+        return False
+
+    def get_info(self):
+        return {}
+
+    def step(self, action):
+        f = self.handle_action(action)
+        reward = -1.0 * self.beta * (1+f)
+        obs = self.get_obs()
+        done = self.get_done()
+        info = self.get_info()
+        return obs, reward, done, info
+
+
+def main():
+    rospy.init_node('ros_agent', anonymous=True)
+    env = RosEnv()
+    agent = RosAgent(env.get_atomic_action_library())
+    obs = env.get_obs()
+    ret = 0.0
+    while not rospy.is_shutdown():
+        print("Please enter a command:")
+        human = input(">> ")
+        recalled = agent.memory.recall(human)
+        if recalled is not None:
+            action = recalled
+            rospy.loginfo("[Memory] Replaying stored action, no LLM call")
+        else:
+            action = agent.get_action(human, obs)
+            agent.memory.store(human, action)
+        obs, reward, done, info = env.step(action)
+        ret += reward
+        rospy.loginfo(f"Action: {action}, Reward: {reward}, Done: {done}, Info: {info}")
+        rospy.loginfo(f"Return: {ret}")
+        if done:
+            break
+
+if __name__ == '__main__':
+    main()
